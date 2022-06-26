@@ -92,6 +92,10 @@ class downloader:
         self.session.mount('https://', HTTPAdapter(max_retries=retries))
         self.session.mount('http://', HTTPAdapter(max_retries=retries))
 
+        # Ali MOD
+        proxies={'http': "192.168.9.100:7893", 'https': "192.168.9.100:7893"}
+        self.session.proxies.update(proxies)
+
         self.start_download()
 
     def get_creators(self, domain:str):

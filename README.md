@@ -1,6 +1,12 @@
 # kemono-dl
 A downloader tool for kemono.party and coomer.party.
 
+MOD:class downloader 中增加代理功能
+
+示例:
+`python kemono-dl.py --cookies "kemono.party_cookies.txt" --links https://kemono.party/fanbox/user/xxxxxx`
+
+
 ## How to use
 1.  Install python 3. (Disable path length limit during install)
 2.  Download source code for the [latest release](https://github.com/AplhaSlayer1964/kemono-dl/releases/latest) and extract it
