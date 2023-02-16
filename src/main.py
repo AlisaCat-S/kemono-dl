@@ -8,11 +8,13 @@ import datetime
 from PIL import Image
 from io import BytesIO
 import json
+from numbers import Number
+import pathlib
 
 from .args import get_args
 from .logger import logger
 from .version import __version__
-from .helper import get_file_hash, print_download_bar, check_date, parse_url, compile_post_path, compile_file_path
+from .helper import get_file_hash, print_download_bar, check_date, parse_url, compile_post_path, compile_file_path, RefererSession
 from .my_yt_dlp import my_yt_dlp
 
 class downloader:
@@ -25,7 +27,7 @@ class downloader:
         self.creators = []
 
         # requests variables
-        self.headers = {'User-Agent': args['user_agent']}
+        self.headers = {'User-Agent': args['user_agent']} if args['user_agent'] else {}
         self.cookies = args['cookies']
         self.timeout = 300
 
@@ -82,8 +84,13 @@ class downloader:
         self.ratelimit_sleep = args['ratelimit_sleep']
         self.post_timeout = args['post_timeout']
         self.simulate = args['simulate']
+        self.local_hash = args['local_hash']
+        self.dupe_check = args['dupe_check']
+        self.force_unlisted = args['force_unlisted']
+        self.retry_403 = args['retry_403']
+        self.fp_added = args['fp_added']
 
-        self.session = requests.Session()
+        self.session = RefererSession()
         retries = Retry(
             total=self.retry,
             backoff_factor=0.1,
@@ -93,7 +100,7 @@ class downloader:
         self.session.mount('http://', HTTPAdapter(max_retries=retries))
 
         # Ali MOD
-        proxies={'http': "192.168.9.100:7893", 'https': "192.168.9.100:7893"}
+        proxies = {'http': "192.168.9.100:7893", 'https': "192.168.9.100:7893"}
         self.session.proxies.update(proxies)
 
         self.start_download()
@@ -141,8 +148,11 @@ class downloader:
         is_post = found.group(6)
         user = self.get_user(user_id, service)
         if not user:
-            logger.error(f"Unable to find user info in creators list | {service} | {user_id}")
-            return
+            if self.force_unlisted:
+                user={'favorited': 0, 'id': user_id, 'indexed': 1666666666, 'name': user_id, 'service': service, 'updated': 1666666666}
+            else:
+                logger.error(f"Unable to find user info in creators list | {service} | {user_id}")
+                return
         if not is_post:
             if self.skip_user(user):
                 return
@@ -163,6 +173,10 @@ class downloader:
                     logger.error(f"Unable to find user json for {api}?o={chunk}")
                 return # completed
             for post in json:
+                post['site']=site
+                if self.archive_file:
+                    if self.skip_post(post,True):
+                        continue
                 post = self.clean_post(post, user, site)
                 # only download once
                 if not is_post and first:
@@ -170,7 +184,7 @@ class downloader:
                     if self.dms:
                         self.write_dms(post)
                     first = False
-                if self.skip_post(post):
+                if self.skip_post(post,False):
                     continue
                 try:
                     self.download_post(post)
@@ -180,9 +194,14 @@ class downloader:
                 except:
                     logger.exception("Unable to download post | service:{service} user_id:{user_id} post_id:{id}".format(**post['post_variables']))
                 self.comp_posts.append("https://{site}/{service}/user/{user_id}/post/{id}".format(**post['post_variables']))
-            if len(json) < 25:
+            # seems like kemono changed this, coomer is not yet
+            if site.startswith('kemono') or len(json)==50:
+                chunk_size=50
+            else:
+                chunk_size=25
+            if len(json) < chunk_size:
                 return # completed
-            chunk += 25
+            chunk += chunk_size
 
 
     def download_icon_banner(self, post:dict, img_types:list):
@@ -232,7 +251,8 @@ class downloader:
 
     def get_inline_images(self, post, content_soup):
         # only get images that are hosted by the .party site
-        inline_images = [inline_image for inline_image in content_soup.find_all("img") if inline_image['src'][0] == '/']
+        inline_images = [inline_image for inline_image in content_soup.find_all("img") if inline_image.get('src')]
+        inline_images = [inline_image for inline_image in inline_images if inline_image['src'][0] == '/']
         for index, inline_image in enumerate(inline_images):
             file = {}
             filename, file_extension = os.path.splitext(inline_image['src'].rsplit('/')[-1])
@@ -243,11 +263,13 @@ class downloader:
                 'ext': file_extension[1:],
                 'url': f"https://{post['post_variables']['site']}/data{inline_image['src']}",
                 'hash': file_hash,
-                'index': f"{index + 1}".zfill(len(str(len(inline_images))))
+                'index': f"{index + 1}".zfill(len(str(len(inline_images)))),
+                'referer': f"https://{post['post_variables']['site']}/{post['post_variables']['service']}/user/{post['post_variables']['user_id']}/post/{post['post_variables']['id']}"
             }
             file['file_path'] = compile_file_path(post['post_path'], post['post_variables'], file['file_variables'], self.inline_filename_template, self.restrict_ascii)
+            html_loc = pathlib.Path(compile_file_path(post['post_path'], post['post_variables'], {'filename':'dummy','ext':'html'}, self.other_filename_template, self.restrict_ascii)).parent
             # set local image location in html
-            inline_image['src'] = file['file_path']
+            inline_image['src'] = str(pathlib.Path(file['file_path']).relative_to(html_loc))
             post['inline_images'].append(file)
         return content_soup
 
@@ -296,10 +318,10 @@ class downloader:
         new_post['post_variables']['username'] = user['name']
         new_post['post_variables']['site'] = domain
         new_post['post_variables']['service'] = post['service']
-        new_post['post_variables']['added'] = datetime.datetime.strptime(post['added'], r'%a, %d %b %Y %H:%M:%S %Z').strftime(self.date_strf_pattern) if post['added'] else None
-        new_post['post_variables']['updated'] = datetime.datetime.strptime(post['edited'], r'%a, %d %b %Y %H:%M:%S %Z').strftime(self.date_strf_pattern) if post['edited'] else None
-        new_post['post_variables']['user_updated'] = datetime.datetime.strptime(user['updated'], r'%a, %d %b %Y %H:%M:%S %Z').strftime(self.date_strf_pattern) if user['updated'] else None
-        new_post['post_variables']['published'] = datetime.datetime.strptime(post['published'], r'%a, %d %b %Y %H:%M:%S %Z').strftime(self.date_strf_pattern) if post['published'] else None
+        new_post['post_variables']['added'] = self.format_time_by_type(post['added']) if post['added'] else None
+        new_post['post_variables']['updated'] = self.format_time_by_type(post['edited']) if post['edited'] else None
+        new_post['post_variables']['user_updated'] = self.format_time_by_type(user['updated']) if user['updated'] else None
+        new_post['post_variables']['published'] = self.format_time_by_type(post['published']) if post['published'] else None
 
         new_post['post_path'] = compile_post_path(new_post['post_variables'], self.download_path_template, self.restrict_ascii)
 
@@ -319,7 +341,8 @@ class downloader:
                     'ext': file_extension[1:],
                     'url': f"https://{domain}/data{attachment['path']}?f={attachment['name']}",
                     'hash': file_hash,
-                    'index': f"{index + 1}".zfill(len(str(len(post['attachments']))))
+                    'index': f"{index + 1}".zfill(len(str(len(post['attachments'])))),
+                    'referer': f"https://{domain}/{post['service']}/user/{post['user']}/post/{post['id']}"
                 }
                 file['file_path'] = compile_file_path(new_post['post_path'], new_post['post_variables'], file['file_variables'], self.filename_template, self.restrict_ascii)
                 new_post['attachments'].append(file)
@@ -423,7 +446,7 @@ class downloader:
                     json.dump(file_content, f, indent=4, sort_keys=True)
             else:
                 with open(file_path,'wb') as f:
-                    f.write(file_content.encode("utf-16"))
+                    f.write(file_content.encode("utf-8"))
 
     def download_file(self, file:dict, retry:int):
         # download a file
@@ -443,7 +466,7 @@ class downloader:
             logger.info(f"Trying to resuming partial download | Resume size: {resume_size} bytes")
 
         try:
-            response = self.session.get(url=file['file_variables']['url'], stream=True, headers={**self.headers,'Range':f"bytes={resume_size}-"}, cookies=self.cookies, timeout=self.timeout)
+            response = self.session.get(url=file['file_variables']['url'], stream=True, headers={**self.headers,'Range':f"bytes={resume_size}-", 'Referer':file['file_variables']['referer']}, cookies=self.cookies, timeout=self.timeout)
         except:
             logger.exception(f"Failed to get responce: {file['file_variables']['url']} | Retrying")
             if retry > 0:
@@ -460,9 +483,24 @@ class downloader:
             return
 
         if response.status_code == 403:
-            logger.error(f"Failed to download: {os.path.split(file['file_path'])[1]} | 403 Forbidden")
-            self.post_errors += 1
-            return
+            for _ in range(self.retry_403):
+                logger.info('A 403 encountered, retry without session.')
+                try:
+                    response = requests.get(url=file['file_variables']['url'], stream=True, headers={'Range':f"bytes={resume_size}-", 'Referer':file['file_variables']['referer']}, timeout=self.timeout)
+                except:
+                    logger.exception(f"Failed to get responce: {file['file_variables']['url']} | Retrying")
+                    if retry > 0:
+                        self.download_file(file, retry=retry-1)
+                        return
+                    logger.error(f"Failed to get responce: {file['file_variables']['url']} | All retries failed")
+                    self.post_errors += 1
+                    return
+                if response.status_code != 403:
+                    break
+            if response.status_code == 403:
+                logger.error(f"Failed to download: {os.path.split(file['file_path'])[1]} | 403 Forbidden")
+                self.post_errors += 1
+                return
 
         if response.status_code == 416:
             logger.warning(f"Failed to download: {os.path.split(file['file_path'])[1]} | 416 Range Not Satisfiable | Assuming broken server hash value")
@@ -474,8 +512,14 @@ class downloader:
                 else:
                     os.rename(part_file, file['file_path'])
                 return
-            logger.error("Incorrect amount of bytes downloaded | Something went so wrong I have no idea what happened | Removing file")
-            os.remove(part_file)
+            logger.error("Incorrect amount of bytes downloaded | Something went so wrong I have no idea what happened | Saving file with suffix in name")
+            # os.remove(part_file)
+            filepath=os.path.splitext(file['file_path'])
+            filepath=filepath[0]+'_statuscode416'+filepath[1]
+            if self.overwrite:
+                os.replace(part_file, filepath)
+            else:
+                os.rename(part_file, filepath)
             self.post_errors += 1
             return
 
@@ -500,10 +544,10 @@ class downloader:
         if not self.simulate:
             if not os.path.exists(os.path.split(file['file_path'])[0]):
                 os.makedirs(os.path.split(file['file_path'])[0])
-            with open(part_file, 'ab') as f:
+            with open(part_file, 'wb' if resume_size == 0 else 'ab') as f:
                 start = time.time()
                 downloaded = resume_size
-                for chunk in response.iter_content(chunk_size=1024*1024):
+                for chunk in response.iter_content(chunk_size=32*1024*1024):
                     downloaded += len(chunk)
                     f.write(chunk)
                     print_download_bar(total, downloaded, resume_size, start)
@@ -514,13 +558,25 @@ class downloader:
             logger.debug(f"Local File hash: {local_hash}")
             logger.debug(f"Sever File hash: {file['file_variables']['hash']}")
             if local_hash != file['file_variables']['hash']:
-                logger.warning(f"File hash did not match server! | Retrying")
-                if retry > 0:
-                    self.download_file(file, retry=retry-1)
+                if file['file_variables']['hash'] !=None:
+                    logger.warning(f"File hash did not match server! | Retrying")
+                    if os.path.getsize(part_file)==total:
+                        os.remove(part_file)
+                    if retry > 0:
+                        self.download_file(file, retry=retry-1)
+                        return
+                    logger.error(f"File hash did not match server! | All retries failed")
+                    self.post_errors += 1
                     return
-                logger.error(f"File hash did not match server! | All retries failed")
-                self.post_errors += 1
-                return
+                else:
+                    logger.warning(f"No hash from server! | Saving file with suffix in name")
+                    filepath=os.path.splitext(file['file_path'])
+                    filepath=filepath[0]+'_noserverhash'+filepath[1]
+                    if self.overwrite:
+                        os.replace(part_file, filepath)
+                    else:
+                        os.rename(part_file, filepath)
+                    return
             # remove .part from file name
             if self.overwrite:
                 os.replace(part_file, file['file_path'])
@@ -547,23 +603,25 @@ class downloader:
     def skip_user(self, user:dict):
         # check last update date
         if self.user_up_datebefore or self.user_up_dateafter:
-            if check_date(datetime.datetime.strptime(user['updated'], r'%a, %d %b %Y %H:%M:%S %Z'), None, self.user_up_datebefore, self.user_up_dateafter):
+            if check_date(self.get_date_by_type(user['updated']), None, self.user_up_datebefore, self.user_up_dateafter):
                 logger.info("Skipping user | user updated date not in range")
                 return True
         return False
 
-    def skip_post(self, post:dict):
+    def skip_post(self, post:dict, check_archive_only:bool):
         # check if the post should be downloaded
-        if self.archive_file:
-            if "https://{site}/{service}/user/{user_id}/post/{id}".format(**post['post_variables']) in self.archive_list:
-                logger.info("Skipping post | post already archived")
+        if self.archive_file and check_archive_only:
+            if "https://{site}/{service}/user/{user}/post/{id}".format(**post) in self.archive_list:
+                logger.info(f"Skipping post {post['id']} | post already archived") # add some numbers to indicate that the script isn't frozen when a lot of posts skipped and your screen is full of this message
                 return True
+            elif check_archive_only:
+                return False
 
         if self.date or self.datebefore or self.dateafter:
             if not post['post_variables']['published']:
                 logger.info("Skipping post | post published date not in range")
                 return True
-            elif check_date(datetime.datetime.strptime(post['post_variables']['published'], self.date_strf_pattern), self.date, self.datebefore, self.dateafter):
+            elif check_date(self.get_date_by_type(post['post_variables']['published' if not self.fp_added else 'added'], self.date_strf_pattern), self.date, self.datebefore, self.dateafter):
                 logger.info("Skipping post | post published date not in range")
                 return True
 
@@ -577,8 +635,27 @@ class downloader:
         # check if file exists
         if not self.overwrite:
             if os.path.exists(file['file_path']):
-                logger.info(f"Skipping: {os.path.split(file['file_path'])[1]} | File already exists")
+                confirm_msg = ''
+                if 'hash' in file['file_variables'] and file['file_variables']['hash'] != None and self.local_hash:
+                    local_hash = get_file_hash(file['file_path'])
+                    if local_hash != file['file_variables']['hash']:
+                        logger.warning(f"Corrupted file detected, remove this file and try to redownload | path: {file['file_path']} " + 
+                                        f"local hash: {local_hash} server hash: {file['file_variables']['hash']}")
+                        os.remove(file['file_path'])
+                        return False
+                    confirm_msg = ' | Hash confirmed'
+                logger.info(f"Skipping: {os.path.split(file['file_path'])[1]} | File already exists{confirm_msg}")
                 return True
+            if self.dupe_check:
+                similar=pathlib.Path(file['file_path']).parent.glob(f'{file["file_variables"]["index"]}_*')
+                for x in similar:
+                    if 'hash' in file['file_variables'] and file['file_variables']['hash'] != None:
+                        sim_hash = get_file_hash(str(x))
+                        if sim_hash == file['file_variables']['hash']:
+                            if x.suffix == '.part':
+                                os.rename(x,x.parent/x.stem)
+                            logger.info(f"Skipping: {os.path.split(file['file_path'])[1]} | Same hash file exists")
+                            return True
 
         # check file name extention
         if self.only_ext:
@@ -645,7 +722,7 @@ class downloader:
 
         if self.k_fav_posts:
             try:
-                self.get_favorites('kemono.party', 'post', retry=self.retry)
+                self.get_favorites('kemono.party', 'post')
             except:
                 logger.exception("Unable to get favorite posts from kemono.party")
         if self.c_fav_posts:
@@ -669,6 +746,21 @@ class downloader:
                 self.get_post(url)
             except:
                 logger.exception(f"Unable to get posts for {url}")
+
+    def get_date_by_type(self, time, date_format =  r'%a, %d %b %Y %H:%M:%S %Z'):
+        if isinstance(time, Number):
+            t = datetime.datetime.fromtimestamp(time)
+        elif isinstance(time, str):
+            t = datetime.datetime.strptime(time, date_format)
+        elif time == None:
+            return None
+        else:
+            raise Exception(f'Can not format time {time}')
+        return t
+                
+    def format_time_by_type(self, time):
+        t = self.get_date_by_type(time)
+        return t.strftime(self.date_strf_pattern) if t != None else t
 
 def main():
     downloader(get_args())

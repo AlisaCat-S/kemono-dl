@@ -11,7 +11,7 @@ def get_args():
     ap = argparse.ArgumentParser()
 
     ap.add_argument("--cookies",
-                    metavar="FILE", type=str, default=None, required=True,
+                    metavar="FILE", type=str, default=None,
                     help="Takes in a cookie file or a list of cookie files separated by a comma. Used to get around the DDOS protection. Your cookie file must have been gotten while logged in to use the favorite options.")
 
 
@@ -199,6 +199,26 @@ def get_args():
     ap.add_argument("--user-agent",
                     metavar="UA", type=str, default='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
                     help="Set a custom user agent")
+
+    ap.add_argument("--local-hash",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help='Check hash before skip downloading local exist files')
+
+    ap.add_argument("--dupe-check",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help='Simple similar filename file search and hash compare to prevent duplicate downloads, only works with "{index}_" first file naming scheme')
+
+    ap.add_argument("--force-unlisted",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help='Still try to request api if user is not found in creators list. Use carefully.')
+
+    ap.add_argument("--retry-403",
+                    metavar='COUNT', type=int, default=0,
+                    help='When get 403 (possibly because of DDoS-Guard), retry without session.')
+
+    ap.add_argument("--fp-added",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help='Filter posts by added date instead of published date. Override behavior of --date --dateafter --datebefore.')
 
     args = vars(ap.parse_args())
 
